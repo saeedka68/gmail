@@ -81,12 +81,24 @@ bot.command("inbox", async (ctx) => {
   }
 });
 
+// تابع ایمن سازی متن برای HTML
+function escapeHtml(text) {
+  if (!text) return "";
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // چک کردن ایمیل هر 1 ثانیه و ارسال ایمیل‌های جدید (غیر تکراری)
 async function checkEmails() {
   try {
     const res = await gmail.users.messages.list({
       userId: "me",
       maxResults: 5,
+      q: "is:unread", // فقط ایمیل‌های خوانده نشده
     });
 
     const messages = res.data.messages || [];
@@ -99,7 +111,6 @@ async function checkEmails() {
       const from = headers.find(h => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
 
-      // ایمن سازی متن برای parse_mode HTML
       const safeSubject = escapeHtml(subject);
       const safeFrom = escapeHtml(from);
       const safeSnippet = escapeHtml(snippet);
@@ -110,23 +121,21 @@ async function checkEmails() {
         { parse_mode: "HTML" }
       );
 
+      // علامت زدن پیام به عنوان خوانده شده
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: msg.id,
+        resource: {
+          removeLabelIds: ["UNREAD"]
+        }
+      });
+
       sentMessageIds.add(msg.id);
       saveSentMessages();
     }
   } catch (err) {
     console.error("❌ Gmail error:", err);
   }
-}
-
-// تابع برای تبدیل کاراکترهای خاص به کاراکترهای امن در HTML
-function escapeHtml(text) {
-  if (!text) return "";
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 // بارگذاری پیام‌های ارسال شده قدیمی

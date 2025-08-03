@@ -1,4 +1,5 @@
 const { Telegraf, session } = require("telegraf");
+const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const { google } = require("googleapis");
@@ -105,6 +106,28 @@ bot.on("text", async (ctx) => {
   }
 });
 
-bot.launch({ polling: true }).then(() => {
-  console.log("🤖 Gmail bot is running with polling");
+// ----------------------------
+// Express + Webhook setup 👇
+// ----------------------------
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// آدرس امن برای webhook
+const WEBHOOK_PATH = "/telegraf-417x"; // می‌تونی عوضش کنی
+
+// تنظیم webhook تلگرام
+bot.telegram.setWebhook(`https://gmail-zzge.onrender.com${WEBHOOK_PATH}`);
+
+// اتصال Telegraf به Express
+app.use(bot.webhookCallback(WEBHOOK_PATH));
+
+// یک روت ساده برای تست
+app.get("/", (req, res) => {
+  res.send("🤖 Gmail bot with Webhook is running!");
+});
+
+// اجرای سرور
+app.listen(PORT, () => {
+  console.log(`🚀 Server is listening on port ${PORT}`);
 });

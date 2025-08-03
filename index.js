@@ -1,107 +1,63 @@
-const { Telegraf, session } = require("telegraf");
-const fs = require("fs");
+const { Telegraf } = require("telegraf");
 const { google } = require("googleapis");
-const readline = require("readline");
 
-// بارگذاری .env
-require("dotenv").config();
-
+// ENV: BOT_TOKEN, MY_TELEGRAM_ID, GOOGLE_CREDENTIALS, GOOGLE_TOKEN
 const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session());
+const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
 
-const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
-const TOKEN_PATH = "token.json";
-const credentials = JSON.parse(fs.readFileSync("credentials.json"));
+// گوگل OAuth2 کلاینت از ENV
+const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+const token = JSON.parse(process.env.GOOGLE_TOKEN);
+const { client_id, client_secret, redirect_uris } = credentials.installed;
+const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+oAuth2Client.setCredentials(token);
 
-const { client_secret, client_id, redirect_uris } = credentials.installed;
-const oAuth2Client = new google.auth.OAuth2(
-  client_id,
-  client_secret,
-  redirect_uris[0]
-);
+// Gmail API
+const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
 
-// گرفتن لینک تأیید از گوگل
-function getAuthUrl() {
-  return oAuth2Client.generateAuthUrl({
-    access_type: "offline",
-    scope: SCOPES,
-  });
-}
-
-// دریافت توکن از کد
-async function getAccessTokenFromCode(code) {
-  const { tokens } = await oAuth2Client.getToken(code);
-  oAuth2Client.setCredentials(tokens);
-  fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
-  return tokens;
-}
-
-// بررسی و بارگذاری توکن
-function loadSavedToken() {
-  if (fs.existsSync(TOKEN_PATH)) {
-    const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
-    oAuth2Client.setCredentials(token);
-    return true;
+// مجوز فقط برای کاربر خاص
+bot.use((ctx, next) => {
+  if (ctx.from.id !== MY_TELEGRAM_ID) {
+    return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
   }
-  return false;
-}
+  return next();
+});
 
-// گرفتن ایمیل‌ها
-async function listMessages(ctx) {
-  const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
-  const res = await gmail.users.messages.list({
-    userId: "me",
-    maxResults: 5,
-  });
+// دستور /start
+bot.start((ctx) => {
+  ctx.reply("سلام! برای مشاهده ایمیل‌ها از دستور /inbox استفاده کن.");
+});
 
-  const messages = res.data.messages || [];
-  if (messages.length === 0) return ctx.reply("📭 هیچ ایمیلی پیدا نشد.");
-
-  for (let i = 0; i < messages.length; i++) {
-    const msg = await gmail.users.messages.get({
+// دستور /inbox
+bot.command("inbox", async (ctx) => {
+  try {
+    const res = await gmail.users.messages.list({
       userId: "me",
-      id: messages[i].id,
+      maxResults: 5,
     });
 
-    const headers = msg.data.payload.headers;
-    const subject =
-      headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-    const from =
-      headers.find((h) => h.name === "From")?.value || "فرستنده ناشناس";
-    const date = headers.find((h) => h.name === "Date")?.value || "";
-
-    await ctx.reply(
-      `✉️ *${subject}*\n👤 ${from}\n🕒 ${date}\n\n📝 ${msg.data.snippet}`,
-      { parse_mode: "Markdown" }
-    );
-  }
-}
-
-// وقتی کاربر دستور /inbox داد
-bot.command("inbox", async (ctx) => {
-  if (loadSavedToken()) {
-    await ctx.reply("📥 دریافت ایمیل‌ها...");
-    return listMessages(ctx);
-  } else {
-    const url = getAuthUrl();
-    ctx.session.waitingForCode = true;
-    return ctx.reply(`🔐 برای دسترسی، روی لینک زیر کلیک کن:\n${url}`);
-  }
-});
-
-// وقتی کاربر کد تأیید را فرستاد
-bot.on("text", async (ctx) => {
-  if (ctx.session.waitingForCode) {
-    try {
-      await getAccessTokenFromCode(ctx.message.text.trim());
-      ctx.session.waitingForCode = false;
-      await ctx.reply("✅ دسترسی برقرار شد! حالا دوباره /inbox رو بفرست.");
-    } catch (err) {
-      console.error(err);
-      ctx.reply("❌ خطا در گرفتن توکن. لطفاً کد درست وارد کن.");
+    const messages = res.data.messages;
+    if (!messages || messages.length === 0) {
+      return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
     }
+
+    for (const msg of messages) {
+      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
+      const headers = full.data.payload.headers;
+      const subject = headers.find(h => h.name === "Subject")?.value || "بدون موضوع";
+      const from = headers.find(h => h.name === "From")?.value || "نامعلوم";
+      const snippet = full.data.snippet || "";
+
+      await ctx.reply(`✉️ <b>${subject}</b>\n👤 ${from}\n📝 ${snippet}`, {
+        parse_mode: "HTML"
+      });
+    }
+  } catch (err) {
+    console.error("❌ Gmail error:", err);
+    ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
 });
 
+// اجرا
 bot.launch();
-console.log("🤖 Gmail bot launched.");
+console.log("📬 Gmail Telegram Bot is running...");

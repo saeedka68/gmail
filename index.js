@@ -1,129 +1,110 @@
-const { Telegraf } = require("telegraf");
-const express = require("express");
+const { Telegraf, session } = require("telegraf");
 const fs = require("fs");
-const axios = require("axios");
 const path = require("path");
 const { google } = require("googleapis");
 
-// ربات و شناسه کاربر مجاز
+const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
+const TOKEN_PATH = path.join(__dirname, "token.json");
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
+bot.use(session());
 
-// تنظیمات گوگل درایو
 const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-const token = JSON.parse(process.env.GOOGLE_TOKEN);
-const auth = new google.auth.OAuth2(
-  credentials.installed.client_id,
-  credentials.installed.client_secret,
-  credentials.installed.redirect_uris[0]
+const { client_secret, client_id, redirect_uris } = credentials.installed;
+
+const oAuth2Client = new google.auth.OAuth2(
+  client_id,
+  client_secret,
+  redirect_uris[0]
 );
-auth.setCredentials(token);
-const drive = google.drive({ version: "v3", auth });
 
-// محدود کردن به فقط کاربر مجاز
-bot.use((ctx, next) => {
-  if (ctx.from.id !== MY_TELEGRAM_ID) {
-    return ctx.reply("❌ دسترسی غیرمجاز");
-  }
-  return next();
-});
-
-// تابع آپلود
-async function handleFile(ctx, fileId, fileName) {
-  try {
-    await ctx.reply(`⬇️ دریافت فایل ${fileName}...`);
-
-    const fileLink = await ctx.telegram.getFileLink(fileId);
-    const res = await axios({
-      url: fileLink.href,
-      method: "GET",
-      responseType: "stream",
-    });
-
-    const tempPath = path.join(__dirname, fileName);
-    const writer = fs.createWriteStream(tempPath);
-    res.data.pipe(writer);
-
-    writer.on("finish", async () => {
-      const driveRes = await drive.files.create({
-        requestBody: { name: fileName },
-        media: { body: fs.createReadStream(tempPath) },
-        fields: "id",
-      });
-
-      await drive.permissions.create({
-        fileId: driveRes.data.id,
-        requestBody: {
-          type: "anyone",
-          role: "reader",
-        },
-      });
-
-      const link = `https://drive.google.com/file/d/${driveRes.data.id}/view`;
-      await ctx.reply(`✅ آپلود شد!\n🔗 ${link}`);
-
-      fs.unlinkSync(tempPath);
-    });
-
-    writer.on("error", () => {
-      ctx.reply("❌ خطا در ذخیره فایل");
-    });
-  } catch (err) {
-    console.error(err);
-    ctx.reply("❌ خطا در آپلود فایل");
-  }
+function getAccessToken(ctx) {
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: SCOPES,
+  });
+  ctx.reply(`برای اتصال به Gmail روی لینک زیر کلیک کن:\n\n${authUrl}`);
+  ctx.reply("بعد از ورود، کدی که بهت می‌ده رو برای من بفرست:");
+  ctx.session.waitingForCode = true;
 }
 
-// پشتیبانی از انواع فایل
-bot.on("document", (ctx) => {
-  const file = ctx.message.document;
-  handleFile(ctx, file.file_id, file.file_name);
+async function listMessages(auth) {
+  const gmail = google.gmail({ version: "v1", auth });
+  const res = await gmail.users.messages.list({
+    userId: "me",
+    maxResults: 5,
+  });
+
+  if (!res.data.messages) return [];
+
+  const messages = [];
+
+  for (const message of res.data.messages) {
+    const fullMsg = await gmail.users.messages.get({
+      userId: "me",
+      id: message.id,
+    });
+
+    const headers = fullMsg.data.payload.headers;
+    const subject =
+      headers.find((h) => h.name === "Subject")?.value || "No Subject";
+    const from =
+      headers.find((h) => h.name === "From")?.value || "Unknown Sender";
+    const date =
+      headers.find((h) => h.name === "Date")?.value || "Unknown Date";
+    const snippet = fullMsg.data.snippet;
+
+    messages.push({ subject, from, date, snippet });
+  }
+
+  return messages;
+}
+
+bot.command("inbox", async (ctx) => {
+  if (!fs.existsSync(TOKEN_PATH)) {
+    return getAccessToken(ctx);
+  }
+
+  const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
+  oAuth2Client.setCredentials(token);
+
+  try {
+    const messages = await listMessages(oAuth2Client);
+    if (!messages.length) return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
+
+    for (const msg of messages) {
+      await ctx.reply(
+        `📩 *Subject*: ${msg.subject}\n👤 *From*: ${msg.from}\n📅 *Date*: ${msg.date}\n📝 ${msg.snippet}`,
+        {
+          parse_mode: "Markdown",
+        }
+      );
+    }
+  } catch (err) {
+    console.error(err);
+    ctx.reply("❌ خطا در خواندن ایمیل‌ها. لطفا دوباره اتصال رو برقرار کن (/inbox)");
+  }
 });
 
-bot.on("photo", (ctx) => {
-  const photo = ctx.message.photo.at(-1);
-  const fileName = `photo_${photo.file_unique_id}.jpg`;
-  handleFile(ctx, photo.file_id, fileName);
+bot.on("text", async (ctx) => {
+  if (!ctx.session?.waitingForCode) return;
+
+  const code = ctx.message.text.trim();
+  ctx.session.waitingForCode = false;
+
+  try {
+    const { tokens } = await oAuth2Client.getToken(code);
+    oAuth2Client.setCredentials(tokens);
+
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
+    ctx.reply("✅ اتصال با موفقیت انجام شد. حالا دستور /inbox رو بفرست.");
+  } catch (err) {
+    console.error("Token Error:", err);
+    ctx.reply("❌ خطا در دریافت توکن. لطفا دوباره کد رو ارسال کن.");
+    ctx.session.waitingForCode = true;
+  }
 });
 
-bot.on("video", (ctx) => {
-  const video = ctx.message.video;
-  const fileName = video.file_name || `video_${video.file_unique_id}.mp4`;
-  handleFile(ctx, video.file_id, fileName);
-});
-
-bot.on("audio", (ctx) => {
-  const audio = ctx.message.audio;
-  const fileName = audio.file_name || `audio_${audio.file_unique_id}.mp3`;
-  handleFile(ctx, audio.file_id, fileName);
-});
-
-bot.on("voice", (ctx) => {
-  const voice = ctx.message.voice;
-  const fileName = `voice_${voice.file_unique_id}.ogg`;
-  handleFile(ctx, voice.file_id, fileName);
-});
-
-bot.on("video_note", (ctx) => {
-  const videoNote = ctx.message.video_note;
-  const fileName = `video_note_${videoNote.file_unique_id}.mp4`;
-  handleFile(ctx, videoNote.file_id, fileName);
-});
-
-// راه‌اندازی Express برای Webhook
-const app = express();
-app.use(bot.webhookCallback("/webhook"));
-
-// Webhook را ست کن
-bot.telegram.setWebhook(`${process.env.RENDER_URL}/webhook`); // رندر URL در env
-
-// روت ساده برای تست
-app.get("/", (req, res) => {
-  res.send("🤖 Bot is running!");
-});
-
-// اجرای سرور
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+bot.launch({ polling: true }).then(() => {
+  console.log("🤖 Gmail bot is running with polling");
 });

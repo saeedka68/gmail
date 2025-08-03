@@ -8,7 +8,7 @@ const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
 // گوگل OAuth2 کلاینت از ENV
 const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 const token = JSON.parse(process.env.GOOGLE_TOKEN);
-const { client_id, client_secret, redirect_uris } = credentials.installed;
+const { client_secret, client_id, redirect_uris } = credentials.installed;
 const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
 oAuth2Client.setCredentials(token);
 

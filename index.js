@@ -2,7 +2,7 @@ const express = require("express");
 const { Telegraf } = require("telegraf");
 const { google } = require("googleapis");
 
-// مقدارها از ENV خوانده میشن
+// متغیرهای محیطی
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
 
@@ -14,7 +14,7 @@ oAuth2Client.setCredentials(token);
 
 const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
 
-// محدود کردن ربات فقط برای یک کاربر
+// مجوز فقط برای کاربر خاص
 bot.use((ctx, next) => {
   if (ctx.from.id !== MY_TELEGRAM_ID) {
     return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
@@ -22,19 +22,13 @@ bot.use((ctx, next) => {
   return next();
 });
 
-// دستور /start
 bot.start((ctx) => {
   ctx.reply("سلام! برای مشاهده ایمیل‌ها از دستور /inbox استفاده کن.");
 });
 
-// دستور /inbox
 bot.command("inbox", async (ctx) => {
   try {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      maxResults: 5,
-    });
-
+    const res = await gmail.users.messages.list({ userId: "me", maxResults: 5 });
     const messages = res.data.messages;
     if (!messages || messages.length === 0) {
       return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
@@ -47,12 +41,7 @@ bot.command("inbox", async (ctx) => {
       const from = headers.find(h => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
 
-      // برای جلوگیری از خطای تلگرام، متن را به HTML safe تبدیل می‌کنیم (اینجا ساده)
-      const safeSubject = subject.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      const safeFrom = from.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      const safeSnippet = snippet.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-      await ctx.reply(`✉️ <b>${safeSubject}</b>\n👤 ${safeFrom}\n📝 ${safeSnippet}`, {
+      await ctx.reply(`✉️ <b>${subject}</b>\n👤 ${from}\n📝 ${snippet}`, {
         parse_mode: "HTML"
       });
     }
@@ -62,22 +51,60 @@ bot.command("inbox", async (ctx) => {
   }
 });
 
+// تابع polling برای چک کردن ایمیل هر 10 ثانیه
+async function checkEmails() {
+  try {
+    const res = await gmail.users.messages.list({ userId: "me", maxResults: 5 });
+    const messages = res.data.messages;
+    if (!messages || messages.length === 0) {
+      console.log("📭 هیچ ایمیلی یافت نشد.");
+      return;
+    }
+
+    for (const msg of messages) {
+      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
+      const headers = full.data.payload.headers;
+      const subject = headers.find(h => h.name === "Subject")?.value || "بدون موضوع";
+      const from = headers.find(h => h.name === "From")?.value || "نامعلوم";
+      const snippet = full.data.snippet || "";
+
+      // ارسال پیام به تلگرام
+      await bot.telegram.sendMessage(
+        MY_TELEGRAM_ID,
+        `✉️ <b>${subject}</b>\n👤 ${from}\n📝 ${snippet}`,
+        { parse_mode: "HTML" }
+      );
+    }
+  } catch (err) {
+    console.error("❌ Gmail error:", err);
+  }
+}
+
+// هر 10 ثانیه اجرا میشه
+setInterval(checkEmails, 10000);
+
+// راه‌اندازی express و webhook تلگرام
 const app = express();
+app.use(express.json());
 
-const WEBHOOK_PATH = "/secret-path";  // این مسیر رو میتونی تغییر بدی
+app.post(`/bot${process.env.BOT_TOKEN}`, (req, res) => {
+  bot.handleUpdate(req.body, res).catch(console.error);
+  res.sendStatus(200);
+});
 
-app.use(bot.webhookCallback(WEBHOOK_PATH));
-
-const PORT = process.env.PORT || 3000;
-
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
 
-  const webhookUrl = process.env.WEBHOOK_URL + WEBHOOK_PATH;
+  const url = process.env.WEBHOOK_URL; // مثلاً https://yourdomain.com/bot<TOKEN>
+  if (!url) {
+    console.error("WEBHOOK_URL در env تعریف نشده!");
+    process.exit(1);
+  }
 
   try {
-    await bot.telegram.setWebhook(webhookUrl);
-    console.log(`Webhook set to ${webhookUrl}`);
+    await bot.telegram.setWebhook(`${url}/bot${process.env.BOT_TOKEN}`);
+    console.log("Webhook set successfully");
   } catch (error) {
     console.error("Failed to set webhook:", error);
   }

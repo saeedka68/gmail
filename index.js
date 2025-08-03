@@ -1,133 +1,107 @@
 const { Telegraf, session } = require("telegraf");
-const express = require("express");
 const fs = require("fs");
-const path = require("path");
 const { google } = require("googleapis");
+const readline = require("readline");
 
-const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
-const TOKEN_PATH = path.join(__dirname, "token.json");
+// بارگذاری .env
+require("dotenv").config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
-const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-const { client_secret, client_id, redirect_uris } = credentials.installed;
+const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
+const TOKEN_PATH = "token.json";
+const credentials = JSON.parse(fs.readFileSync("credentials.json"));
 
+const { client_secret, client_id, redirect_uris } = credentials.installed;
 const oAuth2Client = new google.auth.OAuth2(
   client_id,
   client_secret,
   redirect_uris[0]
 );
 
-function getAccessToken(ctx) {
-  const authUrl = oAuth2Client.generateAuthUrl({
+// گرفتن لینک تأیید از گوگل
+function getAuthUrl() {
+  return oAuth2Client.generateAuthUrl({
     access_type: "offline",
     scope: SCOPES,
   });
-  ctx.reply(`برای اتصال به Gmail روی لینک زیر کلیک کن:\n\n${authUrl}`);
-  ctx.reply("بعد از ورود، کدی که بهت می‌ده رو برای من بفرست:");
-  ctx.session.waitingForCode = true;
 }
 
-async function listMessages(auth) {
-  const gmail = google.gmail({ version: "v1", auth });
+// دریافت توکن از کد
+async function getAccessTokenFromCode(code) {
+  const { tokens } = await oAuth2Client.getToken(code);
+  oAuth2Client.setCredentials(tokens);
+  fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
+  return tokens;
+}
+
+// بررسی و بارگذاری توکن
+function loadSavedToken() {
+  if (fs.existsSync(TOKEN_PATH)) {
+    const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
+    oAuth2Client.setCredentials(token);
+    return true;
+  }
+  return false;
+}
+
+// گرفتن ایمیل‌ها
+async function listMessages(ctx) {
+  const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
   const res = await gmail.users.messages.list({
     userId: "me",
     maxResults: 5,
   });
 
-  if (!res.data.messages) return [];
+  const messages = res.data.messages || [];
+  if (messages.length === 0) return ctx.reply("📭 هیچ ایمیلی پیدا نشد.");
 
-  const messages = [];
-
-  for (const message of res.data.messages) {
-    const fullMsg = await gmail.users.messages.get({
+  for (let i = 0; i < messages.length; i++) {
+    const msg = await gmail.users.messages.get({
       userId: "me",
-      id: message.id,
+      id: messages[i].id,
     });
 
-    const headers = fullMsg.data.payload.headers;
+    const headers = msg.data.payload.headers;
     const subject =
-      headers.find((h) => h.name === "Subject")?.value || "No Subject";
+      headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
     const from =
-      headers.find((h) => h.name === "From")?.value || "Unknown Sender";
-    const date =
-      headers.find((h) => h.name === "Date")?.value || "Unknown Date";
-    const snippet = fullMsg.data.snippet;
+      headers.find((h) => h.name === "From")?.value || "فرستنده ناشناس";
+    const date = headers.find((h) => h.name === "Date")?.value || "";
 
-    messages.push({ subject, from, date, snippet });
+    await ctx.reply(
+      `✉️ *${subject}*\n👤 ${from}\n🕒 ${date}\n\n📝 ${msg.data.snippet}`,
+      { parse_mode: "Markdown" }
+    );
   }
-
-  return messages;
 }
 
+// وقتی کاربر دستور /inbox داد
 bot.command("inbox", async (ctx) => {
-  if (!fs.existsSync(TOKEN_PATH)) {
-    return getAccessToken(ctx);
-  }
-
-  const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
-  oAuth2Client.setCredentials(token);
-
-  try {
-    const messages = await listMessages(oAuth2Client);
-    if (!messages.length) return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
-
-    for (const msg of messages) {
-      await ctx.reply(
-        `📩 *Subject*: ${msg.subject}\n👤 *From*: ${msg.from}\n📅 *Date*: ${msg.date}\n📝 ${msg.snippet}`,
-        {
-          parse_mode: "Markdown",
-        }
-      );
-    }
-  } catch (err) {
-    console.error(err);
-    ctx.reply("❌ خطا در خواندن ایمیل‌ها. لطفا دوباره اتصال رو برقرار کن (/inbox)");
-  }
-});
-
-bot.on("text", async (ctx) => {
-  if (!ctx.session?.waitingForCode) return;
-
-  const code = ctx.message.text.trim();
-  ctx.session.waitingForCode = false;
-
-  try {
-    const { tokens } = await oAuth2Client.getToken(code);
-    oAuth2Client.setCredentials(tokens);
-
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
-    ctx.reply("✅ اتصال با موفقیت انجام شد. حالا دستور /inbox رو بفرست.");
-  } catch (err) {
-    console.error("Token Error:", err);
-    ctx.reply("❌ خطا در دریافت توکن. لطفا دوباره کد رو ارسال کن.");
+  if (loadSavedToken()) {
+    await ctx.reply("📥 دریافت ایمیل‌ها...");
+    return listMessages(ctx);
+  } else {
+    const url = getAuthUrl();
     ctx.session.waitingForCode = true;
+    return ctx.reply(`🔐 برای دسترسی، روی لینک زیر کلیک کن:\n${url}`);
   }
 });
 
-// ----------------------------
-// Express + Webhook setup 👇
-// ----------------------------
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// آدرس امن برای webhook
-const WEBHOOK_PATH = "/telegraf-417x"; // می‌تونی عوضش کنی
-
-// تنظیم webhook تلگرام
-bot.telegram.setWebhook(`https://gmail-zzge.onrender.com${WEBHOOK_PATH}`);
-
-// اتصال Telegraf به Express
-app.use(bot.webhookCallback(WEBHOOK_PATH));
-
-// یک روت ساده برای تست
-app.get("/", (req, res) => {
-  res.send("🤖 Gmail bot with Webhook is running!");
+// وقتی کاربر کد تأیید را فرستاد
+bot.on("text", async (ctx) => {
+  if (ctx.session.waitingForCode) {
+    try {
+      await getAccessTokenFromCode(ctx.message.text.trim());
+      ctx.session.waitingForCode = false;
+      await ctx.reply("✅ دسترسی برقرار شد! حالا دوباره /inbox رو بفرست.");
+    } catch (err) {
+      console.error(err);
+      ctx.reply("❌ خطا در گرفتن توکن. لطفاً کد درست وارد کن.");
+    }
+  }
 });
 
-// اجرای سرور
-app.listen(PORT, () => {
-  console.log(`🚀 Server is listening on port ${PORT}`);
-});
+bot.launch();
+console.log("🤖 Gmail bot launched.");

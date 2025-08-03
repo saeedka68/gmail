@@ -15,7 +15,15 @@ oAuth2Client.setCredentials(token);
 // Gmail API
 const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
 
-// مجوز فقط برای کاربر خاص
+// تابع برای Escape کردن متن HTML
+function escapeHTML(text) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// محدود کردن به فقط کاربر مجاز
 bot.use((ctx, next) => {
   if (ctx.from.id !== MY_TELEGRAM_ID) {
     return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
@@ -48,13 +56,14 @@ bot.command("inbox", async (ctx) => {
       const from = headers.find(h => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
 
-      await ctx.reply(`✉️ <b>${subject}</b>\n👤 ${from}\n📝 ${snippet}`, {
+      await ctx.reply(`✉️ <b>${escapeHTML(subject)}</b>\n👤 ${escapeHTML(from)}\n📝 ${escapeHTML(snippet)}`, {
         parse_mode: "HTML"
       });
     }
   } catch (err) {
     console.error("❌ Gmail error:", err);
-    ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
+    const errorText = `❗️ خطا در دریافت ایمیل‌ها:\n${escapeHTML(err.toString())}`;
+    ctx.reply(errorText);
   }
 });
 

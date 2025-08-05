@@ -4,6 +4,7 @@ const http = require("http");
 const stream = require("stream");
 const { Telegraf, Markup } = require("telegraf");
 const { google } = require("googleapis");
+const jalaali = require("jalaali-js");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
@@ -57,7 +58,7 @@ async function loadSentMessagesFromDrive() {
   }
 }
 
-// ذخیره پیام‌های ارسال‌شده در Google Drive با استفاده از `update`
+// ذخیره پیام‌های ارسال‌شده در Google Drive با استفاده از update
 async function saveSentMessagesToDrive(sentSet) {
   const bufferStream = new stream.PassThrough();
   bufferStream.end(Buffer.from(JSON.stringify(Array.from(sentSet))));
@@ -102,9 +103,74 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
-// توابع ارسال ایمیل‌ها
+// اجرای اولیه با دستور /start
+bot.start(async (ctx) => {
+  await ctx.reply("سلام! آخرین ایمیل‌های خوانده‌نشده برایت فرستاده می‌شوند...");
+  await checkEmails(ctx);
+});
 
-async function sendInbox(ctx) {
+bot.command("help", (ctx) => {
+  ctx.reply(`📌 دستورات قابل استفاده:
+  /start - بررسی ایمیل‌های خوانده‌نشده
+  /inbox - نمایش آخرین ایمیل‌ها
+  /unread - نمایش ایمیل‌های خوانده‌نشده با دکمه خواندن`);
+});
+
+// توابع استخراج تاریخ میلادی و شمسی
+function getFormattedDates(dateStr) {
+  if (!dateStr) return { formattedDateGregorian: "تاریخ نامشخص", formattedDateJalali: "تاریخ نامشخص" };
+
+  const date = new Date(dateStr);
+  if (isNaN(date)) return { formattedDateGregorian: "تاریخ نامشخص", formattedDateJalali: "تاریخ نامشخص" };
+
+  const formattedDateGregorian = date.toLocaleString("en-US", { timeZone: "Asia/Tehran" });
+  const jDate = jalaali.toJalaali(date);
+  const formattedDateJalali = `${jDate.jy}/${jDate.jm.toString().padStart(2, "0")}/${jDate.jd.toString().padStart(2, "0")}`;
+
+  return { formattedDateGregorian, formattedDateJalali };
+}
+
+// بررسی ایمیل‌های خوانده‌نشده
+async function checkEmails(ctx) {
+  try {
+    const res = await gmail.users.messages.list({
+      userId: "me",
+      maxResults: 5,
+      q: "is:unread",
+    });
+
+    const messages = res.data.messages || [];
+    if (messages.length === 0) {
+      return ctx.reply("📭 هیچ ایمیل خوانده‌نشده‌ای وجود ندارد.");
+    }
+
+    for (const msg of messages) {
+      if (sentMessageIds.has(msg.id)) continue;
+
+      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
+      const headers = full.data.payload.headers;
+      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
+      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
+      const snippet = full.data.snippet || "";
+      const dateStr = headers.find((h) => h.name === "Date")?.value || "";
+
+      const { formattedDateGregorian, formattedDateJalali } = getFormattedDates(dateStr);
+
+      await ctx.reply(
+        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n🕒 تاریخ میلادی: ${formattedDateGregorian}\n🕒 تاریخ شمسی: ${formattedDateJalali}\n📝 ${escapeHtml(snippet)}`,
+        { parse_mode: "HTML" }
+      );
+
+      sentMessageIds.add(msg.id);
+      saveSentMessages();
+    }
+  } catch (err) {
+    console.error("❌ خطا در دریافت ایمیل‌ها:", err);
+    ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
+  }
+}
+
+bot.command("inbox", async (ctx) => {
   try {
     const res = await gmail.users.messages.list({
       userId: "me",
@@ -120,9 +186,12 @@ async function sendInbox(ctx) {
       const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
       const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
+      const dateStr = headers.find((h) => h.name === "Date")?.value || "";
+
+      const { formattedDateGregorian, formattedDateJalali } = getFormattedDates(dateStr);
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n🕒 تاریخ میلادی: ${formattedDateGregorian}\n🕒 تاریخ شمسی: ${formattedDateJalali}\n📝 ${escapeHtml(snippet)}`,
         { parse_mode: "HTML" }
       );
     }
@@ -130,9 +199,9 @@ async function sendInbox(ctx) {
     console.error("❌ خطا در inbox:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
-}
+});
 
-async function sendUnread(ctx) {
+bot.command("unread", async (ctx) => {
   try {
     const res = await gmail.users.messages.list({
       userId: "me",
@@ -150,13 +219,19 @@ async function sendUnread(ctx) {
       const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
       const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
+      const dateStr = headers.find((h) => h.name === "Date")?.value || "";
+
+      const { formattedDateGregorian, formattedDateJalali } = getFormattedDates(dateStr);
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n🕒 تاریخ میلادی: ${formattedDateGregorian}\n🕒 تاریخ شمسی: ${formattedDateJalali}\n📝 ${escapeHtml(snippet)}`,
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([
-            Markup.button.callback("✅ علامت‌گذاری به‌عنوان خوانده‌شده", `markread_${msg.id}`),
+            Markup.button.callback(
+              "✅ علامت‌گذاری به‌عنوان خوانده‌شده",
+              `markread_${msg.id}`
+            ),
           ]),
         }
       );
@@ -165,57 +240,7 @@ async function sendUnread(ctx) {
     console.error("❌ خطا در unread:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌های خوانده‌نشده.");
   }
-}
-
-// دستور /start با دکمه‌ها
-
-bot.start(async (ctx) => {
-  await ctx.reply(
-    "سلام! یکی از گزینه‌ها را انتخاب کن:",
-    Markup.inlineKeyboard([
-      [Markup.button.callback("📥 نمایش Inbox", "show_inbox")],
-      [Markup.button.callback("📭 نمایش ایمیل‌های خوانده‌نشده", "show_unread")],
-      [Markup.button.callback("ℹ️ راهنما", "show_help")],
-    ])
-  );
 });
-
-// دستورات کمکی
-
-bot.command("help", (ctx) => {
-  ctx.reply(`📌 دستورات قابل استفاده:
-/start - شروع با دکمه‌ها
-/inbox - نمایش Inbox
-/unread - نمایش ایمیل‌های خوانده‌نشده`);
-});
-
-bot.command("inbox", sendInbox);
-bot.command("unread", sendUnread);
-
-// هندلر دکمه‌ها
-
-bot.action("show_inbox", async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.deleteMessage();
-  await sendInbox(ctx);
-});
-
-bot.action("show_unread", async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.deleteMessage();
-  await sendUnread(ctx);
-});
-
-bot.action("show_help", async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.deleteMessage();
-  await ctx.reply(`📌 دستورات قابل استفاده:
-/start - شروع با دکمه‌ها
-/inbox - نمایش Inbox
-/unread - نمایش ایمیل‌های خوانده‌نشده`);
-});
-
-// علامت‌گذاری ایمیل به عنوان خوانده‌شده با دکمه
 
 bot.action(/^markread_(.+)$/, async (ctx) => {
   const msgId = ctx.match[1];
@@ -241,18 +266,19 @@ bot.action(/^markread_(.+)$/, async (ctx) => {
 });
 
 // راه‌اندازی بات
-
 (async () => {
   await loadSentMessages();
-  bot.launch().then(() => {
-    console.log("📬 Gmail Telegram Bot is running...");
-  }).catch((err) => {
-    console.error("❌ Bot failed to launch:", err);
-  });
+  bot
+    .launch()
+    .then(() => {
+      console.log("📬 Gmail Telegram Bot is running...");
+    })
+    .catch((err) => {
+      console.error("❌ Bot failed to launch:", err);
+    });
 })();
 
-// Keep-alive server برای Render یا سایر هاست‌ها
-
+// Keep-alive server برای Render یا پلتفرم‌های هاستینگ
 const port = process.env.PORT || 3000;
 http
   .createServer((req, res) => {

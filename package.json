@@ -1,16 +1,13 @@
 {
   "name": "gmail-telegram-bot",
   "version": "1.0.0",
-  "description": "A Telegram bot that checks Gmail unread messages.",
+  "description": "Telegram bot for checking Gmail via Google API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "googleapis": "^118.0.0",
-    "node-telegram-bot-api": "^0.61.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "telegraf": "^4.12.2",
+    "googleapis": "^133.0.0"
   }
 }

@@ -1,3 +1,4 @@
+
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
@@ -5,7 +6,6 @@ const stream = require("stream");
 const { Telegraf, Markup } = require("telegraf");
 const { google } = require("googleapis");
 
-// ENV: BOT_TOKEN, MY_TELEGRAM_ID, GOOGLE_CREDENTIALS, GOOGLE_TOKEN, DRIVE_FILE_ID
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
 const DRIVE_FILE_ID = process.env.DRIVE_FILE_ID;
@@ -26,15 +26,10 @@ const drive = google.drive({ version: "v3", auth: oAuth2Client });
 
 let sentMessageIds = new Set();
 
-// ========== Google Drive File Handling ==========
-
 async function loadSentMessagesFromDrive() {
   try {
     const res = await drive.files.get(
-      {
-        fileId: DRIVE_FILE_ID,
-        alt: "media",
-      },
+      { fileId: DRIVE_FILE_ID, alt: "media" },
       { responseType: "stream" }
     );
 
@@ -87,8 +82,6 @@ function saveSentMessages() {
   saveSentMessagesToDrive(sentMessageIds);
 }
 
-// ========== Telegram Bot Logic ==========
-
 bot.use((ctx, next) => {
   if (ctx.from.id !== MY_TELEGRAM_ID) {
     return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
@@ -109,6 +102,13 @@ function escapeHtml(text) {
 bot.start(async (ctx) => {
   await ctx.reply("سلام! آخرین ایمیل‌های خوانده‌نشده برایت فرستاده می‌شوند...");
   await checkEmails(ctx);
+});
+
+bot.command("help", (ctx) => {
+  ctx.reply(`📌 دستورات قابل استفاده:
+/start - بررسی ایمیل‌های خوانده‌نشده
+/inbox - نمایش آخرین ایمیل‌ها
+/unread - نمایش ایمیل‌های خوانده‌نشده با دکمه خواندن`);
 });
 
 async function checkEmails(ctx) {
@@ -136,9 +136,9 @@ async function checkEmails(ctx) {
       const snippet = full.data.snippet || "";
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(
-          from
-        )}\n📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>
+👤 ${escapeHtml(from)}
+📝 ${escapeHtml(snippet)}`,
         { parse_mode: "HTML" }
       );
 
@@ -146,7 +146,7 @@ async function checkEmails(ctx) {
       saveSentMessages();
     }
   } catch (err) {
-    console.error("❌ Gmail error:", err);
+    console.error("❌ Gmail error:", err.response?.data || err.message || err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
 }
@@ -176,14 +176,14 @@ bot.command("inbox", async (ctx) => {
       const snippet = full.data.snippet || "";
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(
-          from
-        )}\n📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>
+👤 ${escapeHtml(from)}
+📝 ${escapeHtml(snippet)}`,
         { parse_mode: "HTML" }
       );
     }
   } catch (err) {
-    console.error("❌ Gmail error:", err);
+    console.error("❌ Gmail error:", err.response?.data || err.message || err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
 });
@@ -213,22 +213,19 @@ bot.command("unread", async (ctx) => {
       const snippet = full.data.snippet || "";
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(
-          from
-        )}\n📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>
+👤 ${escapeHtml(from)}
+📝 ${escapeHtml(snippet)}`,
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([
-            Markup.button.callback(
-              "✅ علامت‌گذاری به‌عنوان خوانده‌شده",
-              `markread_${msg.id}`
-            ),
+            Markup.button.callback("✅ علامت‌گذاری به‌عنوان خوانده‌شده", `markread_${msg.id}`),
           ]),
         }
       );
     }
   } catch (err) {
-    console.error("❌ Gmail unread error:", err);
+    console.error("❌ Gmail unread error:", err.response?.data || err.message || err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌های خوانده‌نشده.");
   }
 });
@@ -248,25 +245,26 @@ bot.action(/^markread_(.+)$/, async (ctx) => {
     sentMessageIds.add(msgId);
     saveSentMessages();
 
-    await ctx.editMessageReplyMarkup(); // حذف دکمه
+    await ctx.editMessageReplyMarkup();
     await ctx.reply("✅ ایمیل با موفقیت به‌عنوان خوانده‌شده علامت خورد.");
   } catch (err) {
-    console.error("❌ mark as read error:", err);
+    console.error("❌ mark as read error:", err.response?.data || err.message || err);
     await ctx.reply("❗️ خطا در علامت‌گذاری ایمیل.");
   }
 });
 
-// شروع ربات
-loadSentMessages();
-bot.launch();
-console.log("📬 Gmail Telegram Bot is running...");
+(async () => {
+  await loadSentMessages();
+  bot.launch().then(() => {
+    console.log("📬 Gmail Telegram Bot is running...");
+  }).catch((err) => {
+    console.error("❌ Bot failed to launch:", err);
+  });
+})();
 
-// Keep-alive server for Render
 const port = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Bot is running\n");
-  })
-  .listen(port);
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot is running\n");
+}).listen(port);
 console.log(`🌐 Keep-alive server is running on port ${port}`);

@@ -1,4 +1,3 @@
-
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
@@ -26,6 +25,7 @@ const drive = google.drive({ version: "v3", auth: oAuth2Client });
 
 let sentMessageIds = new Set();
 
+// ✅ بارگذاری پیام‌های ارسال‌شده از فایل Google Drive
 async function loadSentMessagesFromDrive() {
   try {
     const res = await drive.files.get(
@@ -42,21 +42,22 @@ async function loadSentMessagesFromDrive() {
             const ids = JSON.parse(data);
             resolve(new Set(ids));
           } catch (err) {
-            console.error("❌ Error parsing sentMessages from Drive:", err);
+            console.error("❌ خطا در تبدیل داده‌ها:", err);
             resolve(new Set());
           }
         })
         .on("error", (err) => {
-          console.error("❌ Error reading sentMessages from Drive:", err);
+          console.error("❌ خطا در خواندن فایل:", err);
           reject(new Set());
         });
     });
   } catch (err) {
-    console.error("❌ Cannot load sentMessages from Drive:", err);
+    console.error("❌ خطا در بارگذاری فایل از Google Drive:", err);
     return new Set();
   }
 }
 
+// ✅ ذخیره پیام‌های ارسال‌شده در Google Drive با استفاده از `update`
 async function saveSentMessagesToDrive(sentSet) {
   const bufferStream = new stream.PassThrough();
   bufferStream.end(Buffer.from(JSON.stringify(Array.from(sentSet))));
@@ -70,7 +71,7 @@ async function saveSentMessagesToDrive(sentSet) {
       },
     });
   } catch (err) {
-    console.error("❌ Failed to update sentMessages on Drive:", err);
+    console.error("❌ خطا در به‌روزرسانی فایل در Drive:", err);
   }
 }
 
@@ -82,6 +83,7 @@ function saveSentMessages() {
   saveSentMessagesToDrive(sentMessageIds);
 }
 
+// ✅ بررسی مجاز بودن کاربر
 bot.use((ctx, next) => {
   if (ctx.from.id !== MY_TELEGRAM_ID) {
     return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
@@ -89,6 +91,7 @@ bot.use((ctx, next) => {
   return next();
 });
 
+// ✅ جلوگیری از HTML Injection
 function escapeHtml(text) {
   if (!text) return "";
   return text
@@ -99,6 +102,7 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
+// ✅ اجرای اولیه با دستور /start
 bot.start(async (ctx) => {
   await ctx.reply("سلام! آخرین ایمیل‌های خوانده‌نشده برایت فرستاده می‌شوند...");
   await checkEmails(ctx);
@@ -111,6 +115,7 @@ bot.command("help", (ctx) => {
 /unread - نمایش ایمیل‌های خوانده‌نشده با دکمه خواندن`);
 });
 
+// ✅ بررسی ایمیل‌های خوانده‌نشده
 async function checkEmails(ctx) {
   try {
     const res = await gmail.users.messages.list({
@@ -129,16 +134,12 @@ async function checkEmails(ctx) {
 
       const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
       const headers = full.data.payload.headers;
-      const subject =
-        headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from =
-        headers.find((h) => h.name === "From")?.value || "نامعلوم";
+      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
+      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>
-👤 ${escapeHtml(from)}
-📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n📝 ${escapeHtml(snippet)}`,
         { parse_mode: "HTML" }
       );
 
@@ -146,7 +147,7 @@ async function checkEmails(ctx) {
       saveSentMessages();
     }
   } catch (err) {
-    console.error("❌ Gmail error:", err.response?.data || err.message || err);
+    console.error("❌ خطا در دریافت ایمیل‌ها:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
 }
@@ -158,32 +159,23 @@ bot.command("inbox", async (ctx) => {
       maxResults: 5,
     });
 
-    const messages = res.data.messages;
-    if (!messages || messages.length === 0) {
-      return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
-    }
+    const messages = res.data.messages || [];
+    if (messages.length === 0) return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
 
     for (const msg of messages) {
-      const full = await gmail.users.messages.get({
-        userId: "me",
-        id: msg.id,
-      });
+      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
       const headers = full.data.payload.headers;
-      const subject =
-        headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from =
-        headers.find((h) => h.name === "From")?.value || "نامعلوم";
+      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
+      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>
-👤 ${escapeHtml(from)}
-📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n📝 ${escapeHtml(snippet)}`,
         { parse_mode: "HTML" }
       );
     }
   } catch (err) {
-    console.error("❌ Gmail error:", err.response?.data || err.message || err);
+    console.error("❌ خطا در inbox:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
 });
@@ -201,21 +193,14 @@ bot.command("unread", async (ctx) => {
       return ctx.reply("📭 هیچ ایمیل خوانده‌نشده‌ای وجود ندارد.");
 
     for (const msg of messages) {
-      const full = await gmail.users.messages.get({
-        userId: "me",
-        id: msg.id,
-      });
+      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
       const headers = full.data.payload.headers;
-      const subject =
-        headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from =
-        headers.find((h) => h.name === "From")?.value || "نامعلوم";
+      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
+      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
       const snippet = full.data.snippet || "";
 
       await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>
-👤 ${escapeHtml(from)}
-📝 ${escapeHtml(snippet)}`,
+        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n📝 ${escapeHtml(snippet)}`,
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([
@@ -225,7 +210,7 @@ bot.command("unread", async (ctx) => {
       );
     }
   } catch (err) {
-    console.error("❌ Gmail unread error:", err.response?.data || err.message || err);
+    console.error("❌ خطا در unread:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌های خوانده‌نشده.");
   }
 });
@@ -248,11 +233,12 @@ bot.action(/^markread_(.+)$/, async (ctx) => {
     await ctx.editMessageReplyMarkup();
     await ctx.reply("✅ ایمیل با موفقیت به‌عنوان خوانده‌شده علامت خورد.");
   } catch (err) {
-    console.error("❌ mark as read error:", err.response?.data || err.message || err);
-    await ctx.reply("❗️ خطا در علامت‌گذاری ایمیل.");
+    console.error("❌ خطا در mark as read:", err);
+    ctx.reply("❗️ خطا در علامت‌گذاری ایمیل.");
   }
 });
 
+// ✅ راه‌اندازی بات
 (async () => {
   await loadSentMessages();
   bot.launch().then(() => {
@@ -262,6 +248,7 @@ bot.action(/^markread_(.+)$/, async (ctx) => {
   });
 })();
 
+// ✅ Keep-alive server برای Render
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });

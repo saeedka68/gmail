@@ -1,13 +1,19 @@
 {
   "name": "gmail-telegram-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for checking Gmail via Google API",
+  "description": "Telegram bot to check Gmail and mark emails as read with Persian date support",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "telegraf": "^4.12.2",
-    "googleapis": "^133.0.0"
-  }
+    "googleapis": "^121.0.0",
+    "jalaali-js": "^1.1.0"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "author": "Your Name",
+  "license": "MIT"
 }

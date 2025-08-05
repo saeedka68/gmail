@@ -25,7 +25,7 @@ const drive = google.drive({ version: "v3", auth: oAuth2Client });
 
 let sentMessageIds = new Set();
 
-// ✅ بارگذاری پیام‌های ارسال‌شده از فایل Google Drive
+// بارگذاری پیام‌های ارسال‌شده از فایل Google Drive
 async function loadSentMessagesFromDrive() {
   try {
     const res = await drive.files.get(
@@ -57,7 +57,7 @@ async function loadSentMessagesFromDrive() {
   }
 }
 
-// ✅ ذخیره پیام‌های ارسال‌شده در Google Drive با استفاده از `update`
+// ذخیره پیام‌های ارسال‌شده در Google Drive با استفاده از `update`
 async function saveSentMessagesToDrive(sentSet) {
   const bufferStream = new stream.PassThrough();
   bufferStream.end(Buffer.from(JSON.stringify(Array.from(sentSet))));
@@ -83,7 +83,7 @@ function saveSentMessages() {
   saveSentMessagesToDrive(sentMessageIds);
 }
 
-// ✅ بررسی مجاز بودن کاربر
+// بررسی مجاز بودن کاربر
 bot.use((ctx, next) => {
   if (ctx.from.id !== MY_TELEGRAM_ID) {
     return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
@@ -91,7 +91,7 @@ bot.use((ctx, next) => {
   return next();
 });
 
-// ✅ جلوگیری از HTML Injection
+// جلوگیری از HTML Injection
 function escapeHtml(text) {
   if (!text) return "";
   return text
@@ -102,57 +102,9 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
-// ✅ اجرای اولیه با دستور /start
-bot.start(async (ctx) => {
-  await ctx.reply("سلام! آخرین ایمیل‌های خوانده‌نشده برایت فرستاده می‌شوند...");
-  await checkEmails(ctx);
-});
+// توابع ارسال ایمیل‌ها
 
-bot.command("help", (ctx) => {
-  ctx.reply(`📌 دستورات قابل استفاده:
-/start - بررسی ایمیل‌های خوانده‌نشده
-/inbox - نمایش آخرین ایمیل‌ها
-/unread - نمایش ایمیل‌های خوانده‌نشده با دکمه خواندن`);
-});
-
-// ✅ بررسی ایمیل‌های خوانده‌نشده
-async function checkEmails(ctx) {
-  try {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      maxResults: 5,
-      q: "is:unread",
-    });
-
-    const messages = res.data.messages || [];
-    if (messages.length === 0) {
-      return ctx.reply("📭 هیچ ایمیل خوانده‌نشده‌ای وجود ندارد.");
-    }
-
-    for (const msg of messages) {
-      if (sentMessageIds.has(msg.id)) continue;
-
-      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
-      const headers = full.data.payload.headers;
-      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
-      const snippet = full.data.snippet || "";
-
-      await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n📝 ${escapeHtml(snippet)}`,
-        { parse_mode: "HTML" }
-      );
-
-      sentMessageIds.add(msg.id);
-      saveSentMessages();
-    }
-  } catch (err) {
-    console.error("❌ خطا در دریافت ایمیل‌ها:", err);
-    ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
-  }
-}
-
-bot.command("inbox", async (ctx) => {
+async function sendInbox(ctx) {
   try {
     const res = await gmail.users.messages.list({
       userId: "me",
@@ -178,9 +130,9 @@ bot.command("inbox", async (ctx) => {
     console.error("❌ خطا در inbox:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
   }
-});
+}
 
-bot.command("unread", async (ctx) => {
+async function sendUnread(ctx) {
   try {
     const res = await gmail.users.messages.list({
       userId: "me",
@@ -213,7 +165,57 @@ bot.command("unread", async (ctx) => {
     console.error("❌ خطا در unread:", err);
     ctx.reply("❗️ خطا در دریافت ایمیل‌های خوانده‌نشده.");
   }
+}
+
+// دستور /start با دکمه‌ها
+
+bot.start(async (ctx) => {
+  await ctx.reply(
+    "سلام! یکی از گزینه‌ها را انتخاب کن:",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("📥 نمایش Inbox", "show_inbox")],
+      [Markup.button.callback("📭 نمایش ایمیل‌های خوانده‌نشده", "show_unread")],
+      [Markup.button.callback("ℹ️ راهنما", "show_help")],
+    ])
+  );
 });
+
+// دستورات کمکی
+
+bot.command("help", (ctx) => {
+  ctx.reply(`📌 دستورات قابل استفاده:
+/start - شروع با دکمه‌ها
+/inbox - نمایش Inbox
+/unread - نمایش ایمیل‌های خوانده‌نشده`);
+});
+
+bot.command("inbox", sendInbox);
+bot.command("unread", sendUnread);
+
+// هندلر دکمه‌ها
+
+bot.action("show_inbox", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.deleteMessage();
+  await sendInbox(ctx);
+});
+
+bot.action("show_unread", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.deleteMessage();
+  await sendUnread(ctx);
+});
+
+bot.action("show_help", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.deleteMessage();
+  await ctx.reply(`📌 دستورات قابل استفاده:
+/start - شروع با دکمه‌ها
+/inbox - نمایش Inbox
+/unread - نمایش ایمیل‌های خوانده‌نشده`);
+});
+
+// علامت‌گذاری ایمیل به عنوان خوانده‌شده با دکمه
 
 bot.action(/^markread_(.+)$/, async (ctx) => {
   const msgId = ctx.match[1];
@@ -238,7 +240,8 @@ bot.action(/^markread_(.+)$/, async (ctx) => {
   }
 });
 
-// ✅ راه‌اندازی بات
+// راه‌اندازی بات
+
 (async () => {
   await loadSentMessages();
   bot.launch().then(() => {
@@ -248,10 +251,13 @@ bot.action(/^markread_(.+)$/, async (ctx) => {
   });
 })();
 
-// ✅ Keep-alive server برای Render
+// Keep-alive server برای Render یا سایر هاست‌ها
+
 const port = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Bot is running\n");
-}).listen(port);
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Bot is running\n");
+  })
+  .listen(port);
 console.log(`🌐 Keep-alive server is running on port ${port}`);

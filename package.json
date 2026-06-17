@@ -1,19 +1,17 @@
 {
-  "name": "gmail-telegram-bot",
+  "name": "ip-telegram-bot",
   "version": "1.0.0",
-  "description": "Telegram bot to check Gmail and mark emails as read with Persian date support",
-  "main": "index.js",
+  "description": "ربات تلگرامی برای گرفتن موقعیت IP، پینگ، اسکن پورت و Whois",
+  "main": "bot.js",
   "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "telegraf": "^4.12.2",
-    "googleapis": "^121.0.0",
-    "jalaali-js": "^1.1.0"
+    "start": "node bot.js"
   },
   "engines": {
-    "node": ">=14"
+    "node": ">=18"
   },
-  "author": "Your Name",
-  "license": "MIT"
+  "dependencies": {
+    "axios": "^1.7.2",
+    "express": "^4.19.2",
+    "telegraf": "^4.16.3"
+  }
 }

@@ -1,289 +1,448 @@
-const fs = require("fs");
-const path = require("path");
-const http = require("http");
-const stream = require("stream");
-const { Telegraf, Markup } = require("telegraf");
-const { google } = require("googleapis");
-const jalaali = require("jalaali-js");
+const net = require('net');
+const dns = require('dns').promises;
+const { spawn } = require('child_process');
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID);
-const DRIVE_FILE_ID = process.env.DRIVE_FILE_ID;
+const express = require('express');
+const axios = require('axios');
+const { Telegraf, Markup } = require('telegraf');
 
-const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-const token = JSON.parse(process.env.GOOGLE_TOKEN);
-const { client_secret, client_id, redirect_uris } = credentials.installed;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const PORT = process.env.PORT || 10000;
 
-const oAuth2Client = new google.auth.OAuth2(
-  client_id,
-  client_secret,
-  redirect_uris[0]
-);
-oAuth2Client.setCredentials(token);
+const COMMON_PORTS = {
+  21: 'FTP',
+  22: 'SSH',
+  23: 'Telnet',
+  25: 'SMTP',
+  53: 'DNS',
+  80: 'HTTP',
+  110: 'POP3',
+  143: 'IMAP',
+  443: 'HTTPS',
+  445: 'SMB',
+  3306: 'MySQL',
+  3389: 'RDP',
+  8080: 'HTTP-Alt',
+  8443: 'HTTPS-Alt',
+};
 
-const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
-const drive = google.drive({ version: "v3", auth: oAuth2Client });
+const HISTORY_LIMIT = 5;
 
-let sentMessageIds = new Set();
+// in-memory state (با ری‌استارت سرویس خالی می‌شود)
+const historyStore = new Map(); // chatId -> [{ip, original}]
+const awaitingPort = new Map(); // chatId -> ip
 
-// بارگذاری پیام‌های ارسال‌شده از فایل Google Drive
-async function loadSentMessagesFromDrive() {
+// ---------------------------------------------------------------------------
+// Health-check server. Render نیاز دارد سرویس روی یک پورت گوش بدهد، حتی اگر
+// ربات فقط با polling کار می‌کند.
+// ---------------------------------------------------------------------------
+const app = express();
+app.get('/', (req, res) => res.send('Bot is running ✅'));
+app.listen(PORT, () => console.log(`Health server listening on port ${PORT}`));
+
+// ---------------------------------------------------------------------------
+// Helpers: resolve / private-ip / geo info
+// ---------------------------------------------------------------------------
+function isPrivateIP(ip) {
+  if (ip === '127.0.0.1' || ip === '::1') return true;
+  const parts = ip.split('.').map(Number);
+  if (parts.length === 4 && parts.every((n) => !Number.isNaN(n))) {
+    const [a, b] = parts;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  const lower = ip.toLowerCase();
+  if (lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80')) return true;
+  return false;
+}
+
+async function resolveTarget(text) {
+  text = text.trim();
+  if (net.isIP(text)) {
+    return { ip: text, original: text };
+  }
   try {
-    const res = await drive.files.get(
-      { fileId: DRIVE_FILE_ID, alt: "media" },
-      { responseType: "stream" }
-    );
+    const { address } = await dns.lookup(text);
+    return { ip: address, original: text };
+  } catch (e) {
+    return { ip: null, original: text };
+  }
+}
 
-    let data = "";
-    return new Promise((resolve, reject) => {
-      res.data
-        .on("data", (chunk) => (data += chunk))
-        .on("end", () => {
-          try {
-            const ids = JSON.parse(data);
-            resolve(new Set(ids));
-          } catch (err) {
-            console.error("❌ خطا در تبدیل داده‌ها:", err);
-            resolve(new Set());
-          }
-        })
-        .on("error", (err) => {
-          console.error("❌ خطا در خواندن فایل:", err);
-          reject(new Set());
+async function getIpInfo(ip) {
+  if (isPrivateIP(ip)) return { private: true };
+  try {
+    const url =
+      `http://ip-api.com/json/${ip}?fields=status,message,country,regionName,` +
+      `city,zip,isp,org,as,timezone,reverse,proxy,hosting,query`;
+    const { data } = await axios.get(url, { timeout: 6000 });
+    if (data.status !== 'success') {
+      return { error: data.message || 'اطلاعاتی برای این IP پیدا نشد' };
+    }
+    return data;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: ping (ICMP با fallback به TCP)
+// ---------------------------------------------------------------------------
+function icmpPing(ip, count = 4, timeout = 2) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let proc;
+    try {
+      proc = spawn('ping', ['-c', String(count), '-W', String(timeout), ip]);
+    } catch (e) {
+      resolve(null);
+      return;
+    }
+
+    let output = '';
+    proc.stdout.on('data', (d) => (output += d.toString()));
+    proc.on('error', () => {
+      if (!resolved) {
+        resolved = true;
+        resolve(null);
+      }
+    });
+    proc.on('close', () => {
+      if (resolved) return;
+      resolved = true;
+      const lossMatch = output.match(/(\d+)% packet loss/);
+      const rttMatch = output.match(/= ([\d.]+)\/([\d.]+)\/([\d.]+)\/([\d.]+) ms/);
+      if (rttMatch) {
+        resolve({
+          method: 'icmp',
+          loss: lossMatch ? lossMatch[1] : null,
+          min: rttMatch[1],
+          avg: rttMatch[2],
+          max: rttMatch[3],
+          mdev: rttMatch[4],
         });
-    });
-  } catch (err) {
-    console.error("❌ خطا در بارگذاری فایل از Google Drive:", err);
-    return new Set();
-  }
-}
-
-// ذخیره پیام‌های ارسال‌شده در Google Drive با استفاده از update
-async function saveSentMessagesToDrive(sentSet) {
-  const bufferStream = new stream.PassThrough();
-  bufferStream.end(Buffer.from(JSON.stringify(Array.from(sentSet))));
-
-  try {
-    await drive.files.update({
-      fileId: DRIVE_FILE_ID,
-      media: {
-        mimeType: "application/json",
-        body: bufferStream,
-      },
-    });
-  } catch (err) {
-    console.error("❌ خطا در به‌روزرسانی فایل در Drive:", err);
-  }
-}
-
-async function loadSentMessages() {
-  sentMessageIds = await loadSentMessagesFromDrive();
-}
-
-function saveSentMessages() {
-  saveSentMessagesToDrive(sentMessageIds);
-}
-
-// بررسی مجاز بودن کاربر
-bot.use((ctx, next) => {
-  if (ctx.from.id !== MY_TELEGRAM_ID) {
-    return ctx.reply("⛔️ شما مجاز به استفاده از این ربات نیستید.");
-  }
-  return next();
-});
-
-// جلوگیری از HTML Injection
-function escapeHtml(text) {
-  if (!text) return "";
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-// اجرای اولیه با دستور /start
-bot.start(async (ctx) => {
-  await ctx.reply("سلام! آخرین ایمیل‌های خوانده‌نشده برایت فرستاده می‌شوند...");
-  await checkEmails(ctx);
-});
-
-bot.command("help", (ctx) => {
-  ctx.reply(`📌 دستورات قابل استفاده:
-  /start - بررسی ایمیل‌های خوانده‌نشده
-  /inbox - نمایش آخرین ایمیل‌ها
-  /unread - نمایش ایمیل‌های خوانده‌نشده با دکمه خواندن`);
-});
-
-// توابع استخراج تاریخ میلادی و شمسی
-function getFormattedDates(dateStr) {
-  if (!dateStr) return { formattedDateGregorian: "تاریخ نامشخص", formattedDateJalali: "تاریخ نامشخص" };
-
-  const date = new Date(dateStr);
-  if (isNaN(date)) return { formattedDateGregorian: "تاریخ نامشخص", formattedDateJalali: "تاریخ نامشخص" };
-
-  const formattedDateGregorian = date.toLocaleString("en-US", { timeZone: "Asia/Tehran" });
-  const jDate = jalaali.toJalaali(date);
-  const formattedDateJalali = `${jDate.jy}/${jDate.jm.toString().padStart(2, "0")}/${jDate.jd.toString().padStart(2, "0")}`;
-
-  return { formattedDateGregorian, formattedDateJalali };
-}
-
-// بررسی ایمیل‌های خوانده‌نشده
-async function checkEmails(ctx) {
-  try {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      maxResults: 5,
-      q: "is:unread",
+      } else {
+        resolve(null);
+      }
     });
 
-    const messages = res.data.messages || [];
-    if (messages.length === 0) {
-      return ctx.reply("📭 هیچ ایمیل خوانده‌نشده‌ای وجود ندارد.");
-    }
-
-    for (const msg of messages) {
-      if (sentMessageIds.has(msg.id)) continue;
-
-      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
-      const headers = full.data.payload.headers;
-      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
-      const snippet = full.data.snippet || "";
-      const dateStr = headers.find((h) => h.name === "Date")?.value || "";
-
-      const { formattedDateGregorian, formattedDateJalali } = getFormattedDates(dateStr);
-
-      await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n🕒 تاریخ میلادی: ${formattedDateGregorian}\n🕒 تاریخ شمسی: ${formattedDateJalali}\n📝 ${escapeHtml(snippet)}`,
-        { parse_mode: "HTML" }
-      );
-
-      sentMessageIds.add(msg.id);
-      saveSentMessages();
-    }
-  } catch (err) {
-    console.error("❌ خطا در دریافت ایمیل‌ها:", err);
-    ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
-  }
-}
-
-bot.command("inbox", async (ctx) => {
-  try {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      maxResults: 5,
-    });
-
-    const messages = res.data.messages || [];
-    if (messages.length === 0) return ctx.reply("📭 هیچ ایمیلی یافت نشد.");
-
-    for (const msg of messages) {
-      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
-      const headers = full.data.payload.headers;
-      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
-      const snippet = full.data.snippet || "";
-      const dateStr = headers.find((h) => h.name === "Date")?.value || "";
-
-      const { formattedDateGregorian, formattedDateJalali } = getFormattedDates(dateStr);
-
-      await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n🕒 تاریخ میلادی: ${formattedDateGregorian}\n🕒 تاریخ شمسی: ${formattedDateJalali}\n📝 ${escapeHtml(snippet)}`,
-        { parse_mode: "HTML" }
-      );
-    }
-  } catch (err) {
-    console.error("❌ خطا در inbox:", err);
-    ctx.reply("❗️ خطا در دریافت ایمیل‌ها.");
-  }
-});
-
-bot.command("unread", async (ctx) => {
-  try {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      maxResults: 5,
-      q: "is:unread",
-    });
-
-    const messages = res.data.messages || [];
-    if (messages.length === 0)
-      return ctx.reply("📭 هیچ ایمیل خوانده‌نشده‌ای وجود ندارد.");
-
-    for (const msg of messages) {
-      const full = await gmail.users.messages.get({ userId: "me", id: msg.id });
-      const headers = full.data.payload.headers;
-      const subject = headers.find((h) => h.name === "Subject")?.value || "بدون موضوع";
-      const from = headers.find((h) => h.name === "From")?.value || "نامعلوم";
-      const snippet = full.data.snippet || "";
-      const dateStr = headers.find((h) => h.name === "Date")?.value || "";
-
-      const { formattedDateGregorian, formattedDateJalali } = getFormattedDates(dateStr);
-
-      await ctx.reply(
-        `✉️ <b>${escapeHtml(subject)}</b>\n👤 ${escapeHtml(from)}\n🕒 تاریخ میلادی: ${formattedDateGregorian}\n🕒 تاریخ شمسی: ${formattedDateJalali}\n📝 ${escapeHtml(snippet)}`,
-        {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            Markup.button.callback(
-              "✅ علامت‌گذاری به‌عنوان خوانده‌شده",
-              `markread_${msg.id}`
-            ),
-          ]),
+    setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        try {
+          proc.kill();
+        } catch (e) {
+          /* ignore */
         }
-      );
-    }
-  } catch (err) {
-    console.error("❌ خطا در unread:", err);
-    ctx.reply("❗️ خطا در دریافت ایمیل‌های خوانده‌نشده.");
+        resolve(null);
+      }
+    }, (count * timeout + 5) * 1000);
+  });
+}
+
+function tcpConnectTime(ip, port, timeout = 2000) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const socket = new net.Socket();
+    socket.setTimeout(timeout);
+    socket.once('connect', () => {
+      const elapsed = Date.now() - start;
+      socket.destroy();
+      resolve(elapsed);
+    });
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(null);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      resolve(null);
+    });
+    socket.connect(port, ip);
+  });
+}
+
+async function tcpPing(ip, ports = [443, 80]) {
+  for (const port of ports) {
+    const elapsed = await tcpConnectTime(ip, port);
+    if (elapsed !== null) return { method: 'tcp', port, avg: elapsed };
   }
-});
+  return null;
+}
 
-bot.action(/^markread_(.+)$/, async (ctx) => {
-  const msgId = ctx.match[1];
+async function pingTarget(ip) {
+  const result = await icmpPing(ip);
+  if (result) return result;
+  // اگر ICMP مجاز نبود (حالت معمول در Render)، با TCP تست می‌کنیم
+  return await tcpPing(ip);
+}
 
+// ---------------------------------------------------------------------------
+// Helpers: port scan / single port check
+// ---------------------------------------------------------------------------
+function checkPort(ip, port, timeout = 1500) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let connected = false;
+    socket.setTimeout(timeout);
+    socket.once('connect', () => {
+      connected = true;
+      socket.destroy();
+    });
+    socket.once('timeout', () => socket.destroy());
+    socket.once('error', () => socket.destroy());
+    socket.once('close', () => resolve(connected));
+    socket.connect(port, ip);
+  });
+}
+
+async function scanCommonPorts(ip) {
+  const ports = Object.keys(COMMON_PORTS).map(Number);
+  const results = await Promise.all(ports.map((p) => checkPort(ip, p)));
+  const map = {};
+  ports.forEach((p, i) => (map[p] = results[i]));
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: whois (RDAP - شبکه، نه ثبت دامنه)
+// ---------------------------------------------------------------------------
+async function getWhoisInfo(ip) {
+  if (isPrivateIP(ip)) {
+    return { error: 'این IP خصوصی/داخلی است و رکورد Whois عمومی ندارد' };
+  }
   try {
-    await gmail.users.messages.modify({
-      userId: "me",
-      id: msgId,
-      resource: {
-        removeLabelIds: ["UNREAD"],
-      },
+    const { data } = await axios.get(`https://rdap.org/ip/${ip}`, {
+      timeout: 8000,
+      headers: { Accept: 'application/rdap+json' },
     });
-
-    sentMessageIds.add(msgId);
-    saveSentMessages();
-
-    await ctx.editMessageReplyMarkup();
-    await ctx.reply("✅ ایمیل با موفقیت به‌عنوان خوانده‌شده علامت خورد.");
-  } catch (err) {
-    console.error("❌ خطا در mark as read:", err);
-    ctx.reply("❗️ خطا در علامت‌گذاری ایمیل.");
+    return {
+      name: data.name || '-',
+      handle: data.handle || '-',
+      country: data.country || '-',
+      startAddress: data.startAddress || '-',
+      endAddress: data.endAddress || '-',
+    };
+  } catch (e) {
+    return { error: e.message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard / history helpers
+// ---------------------------------------------------------------------------
+function buildActionKeyboard(ip) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('🔌 اسکن پورت‌های رایج', `scan:${ip}`),
+      Markup.button.callback('🔢 بررسی پورت خاص', `port:${ip}`),
+    ],
+    [
+      Markup.button.callback('📋 Whois', `whois:${ip}`),
+      Markup.button.callback('🔁 بررسی دوباره', `recheck:${ip}`),
+    ],
+  ]);
+}
+
+function saveHistory(chatId, ip, original) {
+  let history = historyStore.get(chatId) || [];
+  history = history.filter((h) => h.ip !== ip);
+  history.unshift({ ip, original });
+  history = history.slice(0, HISTORY_LIMIT);
+  historyStore.set(chatId, history);
+}
+
+// ---------------------------------------------------------------------------
+// Report builder
+// ---------------------------------------------------------------------------
+async function buildReport(ip, original) {
+  const [info, pingResult] = await Promise.all([getIpInfo(ip), pingTarget(ip)]);
+
+  const lines = [`🔎 نتیجه برای: \`${original}\``];
+  if (original !== ip) {
+    lines.push(`➡️ IP: \`${ip}\``);
+  }
+
+  if (info.private) {
+    lines.push('\n⚠️ این یک آدرس IP خصوصی/داخلی است، اطلاعات جغرافیایی موجود نیست.');
+  } else if (info.error) {
+    lines.push(`\n⚠️ خطا در گرفتن اطلاعات: ${info.error}`);
+  } else {
+    lines.push(
+      `\n📍 موقعیت: ${info.city || '-'}, ${info.regionName || '-'} - ${info.country || '-'}`
+    );
+    lines.push(`🏢 ISP: ${info.isp || '-'}`);
+    lines.push(`🏛 سازمان: ${info.org || '-'}`);
+    lines.push(`🛰 AS: ${info.as || '-'}`);
+    lines.push(`🕐 تایم‌زون: ${info.timezone || '-'}`);
+    if (info.reverse) lines.push(`🔁 Reverse DNS: ${info.reverse}`);
+    if (info.proxy) lines.push('🛑 این IP به‌عنوان پراکسی/VPN شناخته شده');
+    if (info.hosting) lines.push('☁️ این IP مربوط به یک دیتاسنتر/هاستینگ است');
+  }
+
+  lines.push('');
+  if (!pingResult) {
+    lines.push('📡 پینگ: پاسخی دریافت نشد (Host Unreachable)');
+  } else if (pingResult.method === 'icmp') {
+    lines.push(`📡 پینگ (ICMP): میانگین ${pingResult.avg} ms | پکت‌لاس ${pingResult.loss}%`);
+  } else {
+    lines.push(`📡 پینگ (TCP پورت ${pingResult.port}): ${pingResult.avg} ms`);
+    lines.push('ℹ️ پینگ ICMP در محیط سرور مجاز نبود، از TCP استفاده شد.');
+  }
+
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Telegram bot
+// ---------------------------------------------------------------------------
+if (!BOT_TOKEN) {
+  throw new Error('متغیر BOT_TOKEN تنظیم نشده است. آن را در Environment Variables رندر اضافه کن.');
+}
+
+const bot = new Telegraf(BOT_TOKEN);
+
+const START_TEXT =
+  'سلام 👋\n' +
+  'یک آدرس IP یا دامنه برام بفرست تا:\n' +
+  '📍 موقعیت جغرافیایی\n' +
+  '🏢 ISP و سازمان مربوطه\n' +
+  '📡 وضعیت پینگ\n' +
+  'رو بهت بدم.\n\n' +
+  'بعدش با دکمه‌های زیر پیام می‌تونی:\n' +
+  '🔌 پورت‌های رایج رو اسکن کنی\n' +
+  '🔢 یک پورت خاص رو چک کنی\n' +
+  '📋 Whois (شبکه) بگیری\n' +
+  '🔁 دوباره بررسی کنی\n\n' +
+  'برای دیدن تاریخچه: /history\n\n' +
+  'مثال: 8.8.8.8';
+
+bot.start((ctx) => ctx.reply(START_TEXT));
+bot.help((ctx) => ctx.reply(START_TEXT));
+
+bot.command('history', (ctx) => {
+  const history = historyStore.get(ctx.chat.id) || [];
+  if (history.length === 0) {
+    return ctx.reply('📜 هنوز تاریخچه‌ای ثبت نشده.');
+  }
+  const buttons = history.map((h) => [Markup.button.callback(`🔁 ${h.original}`, `recheck:${h.ip}`)]);
+  return ctx.reply('📜 تاریخچه بررسی‌ها (روی هرکدوم بزن تا دوباره چک شه):', Markup.inlineKeyboard(buttons));
 });
 
-// راه‌اندازی بات
-(async () => {
-  await loadSentMessages();
-  bot
-    .launch()
-    .then(() => {
-      console.log("📬 Gmail Telegram Bot is running...");
-    })
-    .catch((err) => {
-      console.error("❌ Bot failed to launch:", err);
-    });
-})();
+bot.on('text', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const text = ctx.message.text.trim();
 
-// Keep-alive server برای Render یا پلتفرم‌های هاستینگ
-const port = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Bot is running\n");
-  })
-  .listen(port);
-console.log(`🌐 Keep-alive server is running on port ${port}`);
+  // اگر منتظر شماره‌ی پورت برای یک IP خاص هستیم
+  const awaitingIp = awaitingPort.get(chatId);
+  if (awaitingIp) {
+    const port = Number(text);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      awaitingPort.delete(chatId);
+      const msg = await ctx.reply(`⏳ در حال بررسی پورت ${port} روی \`${awaitingIp}\`...`, {
+        parse_mode: 'Markdown',
+      });
+      const isOpen = await checkPort(awaitingIp, port);
+      const status = isOpen ? '✅ باز است' : '❌ بسته است / پاسخ نداد';
+      await ctx.telegram.editMessageText(
+        chatId,
+        msg.message_id,
+        undefined,
+        `🔢 پورت ${port} روی \`${awaitingIp}\`: ${status}`,
+        { parse_mode: 'Markdown', ...buildActionKeyboard(awaitingIp) }
+      );
+    } else {
+      await ctx.reply('❌ لطفاً یک عدد بین 1 تا 65535 به‌عنوان شماره پورت بفرست.');
+    }
+    return;
+  }
+
+  const { ip, original } = await resolveTarget(text);
+  if (!ip) {
+    await ctx.reply('❌ این یک IP یا دامنه معتبر نیست. دوباره امتحان کن.');
+    return;
+  }
+
+  const msg = await ctx.reply('⏳ در حال بررسی...');
+  const report = await buildReport(ip, original);
+  saveHistory(chatId, ip, original);
+  await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, report, {
+    parse_mode: 'Markdown',
+    ...buildActionKeyboard(ip),
+  });
+});
+
+bot.action(/^recheck:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const ip = ctx.match[1];
+  const chatId = ctx.chat.id;
+  const history = historyStore.get(chatId) || [];
+  const found = history.find((h) => h.ip === ip);
+  const original = found ? found.original : ip;
+
+  await ctx.editMessageText('⏳ در حال بررسی...');
+  const report = await buildReport(ip, original);
+  saveHistory(chatId, ip, original);
+  await ctx.editMessageText(report, { parse_mode: 'Markdown', ...buildActionKeyboard(ip) });
+});
+
+bot.action(/^scan:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const ip = ctx.match[1];
+  await ctx.editMessageText(`⏳ در حال اسکن پورت‌های رایج برای \`${ip}\` ...`, {
+    parse_mode: 'Markdown',
+  });
+  const results = await scanCommonPorts(ip);
+  const open = Object.entries(results)
+    .filter(([, ok]) => ok)
+    .map(([p]) => `${p} (${COMMON_PORTS[p]})`);
+  const closed = Object.entries(results)
+    .filter(([, ok]) => !ok)
+    .map(([p]) => p);
+  const text =
+    `🔌 نتیجه اسکن پورت برای \`${ip}\`:\n\n` +
+    `✅ باز: ${open.length ? open.join(', ') : 'هیچ‌کدام'}\n` +
+    `❌ بسته/بدون پاسخ: ${closed.length ? closed.join(', ') : 'هیچ‌کدام'}`;
+  await ctx.editMessageText(text, { parse_mode: 'Markdown', ...buildActionKeyboard(ip) });
+});
+
+bot.action(/^port:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const ip = ctx.match[1];
+  awaitingPort.set(ctx.chat.id, ip);
+  await ctx.editMessageText(`🔢 شماره پورتی که می‌خوای برای \`${ip}\` چک کنم رو بفرست (مثلاً 8080):`, {
+    parse_mode: 'Markdown',
+  });
+});
+
+bot.action(/^whois:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const ip = ctx.match[1];
+  await ctx.editMessageText(`⏳ در حال گرفتن اطلاعات Whois برای \`${ip}\` ...`, {
+    parse_mode: 'Markdown',
+  });
+  const info = await getWhoisInfo(ip);
+  let text;
+  if (info.error) {
+    text = `⚠️ اطلاعات Whois پیدا نشد: ${info.error}`;
+  } else {
+    text =
+      `📋 Whois (شبکه) برای \`${ip}\`:\n\n` +
+      `🏷 نام شبکه: ${info.name}\n` +
+      `🔖 Handle: ${info.handle}\n` +
+      `🌍 کشور: ${info.country}\n` +
+      `📦 رنج آدرس: ${info.startAddress} - ${info.endAddress}\n\n` +
+      `ℹ️ این اطلاعات شبکه (RDAP) است، نه اطلاعات ثبت دامنه (مالک/تاریخ ثبت).`;
+  }
+  await ctx.editMessageText(text, { parse_mode: 'Markdown', ...buildActionKeyboard(ip) });
+});
+
+bot
+  .launch()
+  .then(() => console.log('Bot started polling...'))
+  .catch((err) => console.error('Failed to launch bot:', err));
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
